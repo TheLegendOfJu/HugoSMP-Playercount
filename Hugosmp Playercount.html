@@ -1,0 +1,179 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+<meta charset="utf-8">
+<title>HugoSMP Playercount Overlay</title>
+<style>
+  html,body{margin:0;background:transparent;overflow:hidden}
+  #overlay{position:relative;display:inline-flex;align-items:center;gap:10px;padding:11px 15px 11px 12px;margin:2px}
+  #bg{position:absolute;left:0;top:0;z-index:0}
+  #overlay>:not(#bg){position:relative;z-index:1}
+  svg{display:block;shape-rendering:crispEdges}
+  #count{display:flex}
+  .slot{position:relative;overflow:hidden}
+  .slot svg{position:absolute;left:0;top:0}
+  #dot{animation:pulse 1.6s ease-in-out infinite;transform-origin:center}
+  #dot.off{animation:none}
+  @keyframes pulse{
+    0%,100%{transform:scale(1);opacity:1;filter:drop-shadow(0 0 2px rgba(255,30,20,.5))}
+    50%{transform:scale(1.15);opacity:.75;filter:drop-shadow(0 0 7px rgba(255,30,20,.95))}
+  }
+</style>
+</head>
+<body>
+<div id="overlay">
+  <svg id="bg"></svg>
+  <svg id="dot"></svg>
+  <div id="count"></div>
+</div>
+<script>
+/* ===== EINSTELLUNGEN ===== */
+const SERVER     = "hugosmp.net";
+const SHOW_MAX   = false;   // true = "12/100" statt "12"
+const REFRESH_S  = 10;      // Update-Intervall in Sekunden
+const BG_OPACITY = 1.0;     // Hintergrund-Deckkraft: 0 = unsichtbar, 1 = voll
+const BG_PIXEL   = 2;       // Pixelgröße des Rahmens
+const TEXT_COLOR = "#404040"; // Zahlenfarbe (Minecraft-GUI-Grau)
+const SHADOW_COLOR = "";    // z. B. "#ffffff" für Schatten, leer = kein Schatten
+const ROLL_MS    = 550;     // Dauer der Zahlen-Animation in Millisekunden
+const DOT_SCALE  = 10;      // Größe eines Kreis-Pixels
+const TEXT_SCALE = 4;       // Größe eines Schrift-Pixels
+/* ========================= */
+
+const NS = "http://www.w3.org/2000/svg";
+const GLYPHS = {
+ "0":["01110","10001","10011","10101","11001","10001","01110"],
+ "1":["00100","01100","00100","00100","00100","00100","11111"],
+ "2":["01110","10001","00001","00110","01000","10000","11111"],
+ "3":["01110","10001","00001","00110","00001","10001","01110"],
+ "4":["00011","00101","01001","10001","11111","00001","00001"],
+ "5":["11111","10000","11110","00001","00001","10001","01110"],
+ "6":["00110","01000","10000","11110","10001","10001","01110"],
+ "7":["11111","10001","00001","00010","00100","00100","00100"],
+ "8":["01110","10001","10001","01110","10001","10001","01110"],
+ "9":["01110","10001","10001","01111","00001","00010","01100"],
+ "/":["00001","00010","00010","00100","01000","01000","10000"],
+ "?":["01110","10001","00001","00010","00100","00000","00100"],
+ "-":["00000","00000","00000","11111","00000","00000","00000"]
+};
+function rect(svg,x,y,w,h,fill,extra){
+  const r=document.createElementNS(NS,"rect");
+  r.setAttribute("x",x);r.setAttribute("y",y);r.setAttribute("width",w);r.setAttribute("height",h);
+  r.setAttribute("fill",fill);
+  if(extra) for(const k in extra) r.setAttribute(k,extra[k]);
+  svg.appendChild(r);
+}
+
+/* 4x4 Kreis ohne Ecken */
+function drawDot(online){
+  const svg=document.getElementById("dot"), s=DOT_SCALE;
+  svg.innerHTML="";
+  svg.setAttribute("width",4*s+4);svg.setAttribute("height",4*s+4);
+  const cells=[];
+  for(let y=0;y<4;y++)for(let x=0;x<4;x++){
+    if((x===0||x===3)&&(y===0||y===3))continue;
+    cells.push([x,y]);
+  }
+  const c = online ? ["#ff2a1a","#e00000","#9a0000"] : ["#9a9a9a","#777","#4a4a4a"];
+  svg.classList.toggle("off",!online);
+  // Fläche mit Verlauf (oben hell, unten dunkel)
+  cells.forEach(([x,y])=>{
+    const col = y===0?c[0]: y===3?c[2]: c[1];
+    rect(svg,4+x*s,4+y*s,s,s,col);
+  });
+}
+
+/* Pixelschrift mit Minecraft-Schatten: ein Zeichen als SVG */
+const GAP=1;
+function glyph(ch){
+  const s=TEXT_SCALE, svg=document.createElementNS(NS,"svg");
+  svg.setAttribute("width",(5+GAP)*s);svg.setAttribute("height",8*s);
+  const g=GLYPHS[ch]||GLYPHS["?"];
+  (SHADOW_COLOR?[[s,s,SHADOW_COLOR],[0,0,TEXT_COLOR]]:[[0,0,TEXT_COLOR]]).forEach(([ox,oy,col])=>{
+    g.forEach((row,y)=>[...row].forEach((v,x)=>{
+      if(v==="1") rect(svg,ox+x*s,oy+y*s,s,s,col);
+    }));
+  });
+  return svg;
+}
+
+/* Zahl mit Rollen-Animation (Ziffer für Ziffer) */
+const box=document.getElementById("count");
+let slots=[];
+function makeSlot(){
+  const el=document.createElement("div");
+  el.className="slot";
+  el.style.width=(5+GAP)*TEXT_SCALE+"px";
+  el.style.height=8*TEXT_SCALE+"px";
+  return {el,ch:null};
+}
+function roll(slot,ch,dir){
+  const H=8*TEXT_SCALE+2, el=slot.el;
+  while(el.children.length>1) el.firstChild.remove();   // laufende Animation beenden
+  const old=el.firstChild, neu=glyph(ch);
+  el.appendChild(neu);
+  slot.ch=ch;
+  if(!dir){ if(old) old.remove(); return; }
+  const opt={duration:ROLL_MS,easing:"cubic-bezier(.2,.8,.2,1)",fill:"both"};
+  // dir > 0 (mehr Spieler): alte Ziffer fällt nach unten, neue kommt von oben
+  // dir < 0 (weniger Spieler): alte Ziffer geht nach oben, neue kommt von unten
+  const from = dir>0 ? -H : H;
+  neu.animate([{transform:`translateY(${from}px)`},{transform:"translateY(0)"}],opt);
+  if(old){
+    const a=old.animate([{transform:"translateY(0)"},{transform:`translateY(${-from}px)`}],opt);
+    a.onfinish=()=>old.remove();
+  }
+}
+function setText(str,dir){
+  const chars=[...str];
+  while(slots.length<chars.length){ const s=makeSlot(); box.insertBefore(s.el,box.firstChild); slots.unshift(s); }
+  while(slots.length>chars.length){ slots.shift().el.remove(); }
+  chars.forEach((ch,i)=>{ if(slots[i].ch!==ch) roll(slots[i],ch,dir); });
+}
+
+/* Minecraft-Inventar-Hintergrund (grau, helle/dunkle Kanten, schwarze Kontur) */
+function drawBg(){
+  const o=document.getElementById("overlay"), svg=document.getElementById("bg"), P=BG_PIXEL;
+  const W=Math.round(o.offsetWidth/P), H=Math.round(o.offsetHeight/P);
+  svg.innerHTML="";
+  svg.setAttribute("width",W*P);svg.setAttribute("height",H*P);
+  svg.style.opacity=BG_OPACITY;
+  const c=(x,y,w,h,col)=>rect(svg,x*P,y*P,w*P,h*P,col);
+  const BLACK="#000000", GRAY="#c6c6c6", LIGHT="#ffffff", DARK="#555555";
+  // Fläche
+  c(1,1,W-2,H-2,GRAY);
+  // helle Kanten oben/links, dunkle unten/rechts (je 2 Pixel dick)
+  c(1,1,W-3,2,LIGHT);  c(1,1,2,H-3,LIGHT);
+  c(2,H-3,W-3,2,DARK); c(W-3,2,2,H-3,DARK);
+  // schwarze Kontur ohne Ecken
+  c(1,0,W-2,1,BLACK); c(1,H-1,W-2,1,BLACK);
+  c(0,1,1,H-2,BLACK); c(W-1,1,1,H-2,BLACK);
+  // abgerundete Ecken (Pixeltreppe)
+  c(1,1,1,1,BLACK); c(W-2,1,1,1,BLACK); c(1,H-2,1,1,BLACK); c(W-2,H-2,1,1,BLACK);
+}
+if(window.ResizeObserver) new ResizeObserver(drawBg).observe(document.getElementById("overlay"));
+
+let lastCount=null;
+
+async function update(){
+  try{
+    const r=await fetch("https://api.mcstatus.io/v2/status/java/"+SERVER,{cache:"no-store"});
+    const d=await r.json();
+    if(d.online){
+      const n=d.players.online;
+      const dir = lastCount===null ? 0 : Math.sign(n-lastCount);
+      drawDot(true);
+      setText(SHOW_MAX? n+"/"+d.players.max : String(n), dir);
+      lastCount=n;
+    }else{
+      drawDot(false); setText("0",0); lastCount=null;
+    }
+  }catch(e){
+    drawDot(false); setText("-",0); lastCount=null;
+  }
+}
+drawDot(false); setText("-",0); drawBg();
+update(); setInterval(update,REFRESH_S*1000);
+</script>
+</body>
+</html>
